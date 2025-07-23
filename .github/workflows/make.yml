@@ -1,9 +1,14 @@
 name: Build Android aarch64 Nginx
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
   push:
-    branches: [ main ] # 根据你的分支名修改
+    branches: [ master ]
+
+env:
+  NDK_VERSION: "r25c"
+  NGINX_VERSION: "1.25.3"
+  ANDROID_API: 28
 
 jobs:
   build:
@@ -13,41 +18,38 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up NDK
+    - name: Setup NDK
       run: |
-        NDK_VERSION="r25c"
-        wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
-        unzip -q android-ndk-${NDK_VERSION}-linux.zip
-        echo "NDK_HOME=$(pwd)/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+        unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+        echo "NDK_HOME=$(pwd)/android-ndk-${{ env.NDK_VERSION}}" >> $GITHUB_ENV
 
-    - name: Set up toolchain
+    - name: Setup toolchain
       run: |
-        export TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-        export TARGET=aarch64-linux-android
-        export API_LEVEL=28
+        TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        TARGET=aarch64-linux-android
         
-        echo "CC=$TOOLCHAIN/bin/$TARGET$API_LEVEL-clang" >> $GITHUB_ENV
-        echo "CXX=$TOOLCHAIN/bin/$TARGET$API_LEVEL-clang++" >> $GITHUB_ENV
+        echo "CC=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
+        echo "CXX=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
         echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
-        echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
-        echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
         echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential libtool automake
+    - name: Install build dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential libtool automake
 
-    - name: Download and prepare Nginx
+    - name: Download Nginx
       run: |
-        NGINX_VERSION="1.25.3"
-        wget -q http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
-        tar -xzf nginx-${NGINX_VERSION}.tar.gz
-        cd nginx-${NGINX_VERSION}
-        
-        # Android 特定补丁 (示例)
-        sed -i 's/nginx_init_cycle/ngx_init_cycle/g' src/core/nginx.c
+        wget -q http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
+        tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
+
+    - name: Apply Android patches
+      run: |
+        cd nginx-${{ env.NGINX_VERSION }}
+        # 关键补丁：修复 Android 初始化问题
+        sed -i 's/nginx_init_cycle/ngx_init_cycle/' src/core/nginx.c
+        # 禁用 Linux 特定功能
+        sed -i 's/NGX_HAVE_SCHED_SETAFFINITY/NGX_HAVE_DUMMY_SCHED_SETAFFINITY/' src/os/unix/ngx_linux_config.h
 
     - name: Configure Nginx
       run: |
@@ -56,11 +58,11 @@ jobs:
           --prefix=/data/local/tmp/nginx \
           --crossbuild=Android \
           --with-cc="$CC" \
-          --with-cpp="$CXX" \
           --with-cc-opt="--sysroot=$SYSROOT -fPIE -fPIC" \
           --with-ld-opt="--sysroot=$SYSROOT -pie" \
           --without-http_rewrite_module \
           --without-http_gzip_module \
+          --without-pcre \
           --with-select_module
 
     - name: Build Nginx
@@ -68,15 +70,18 @@ jobs:
         cd nginx-${{ env.NGINX_VERSION }}
         make -j$(nproc)
 
-    - name: Package artifacts
+    - name: Prepare artifacts
       run: |
         mkdir -p android-nginx
         cp nginx-${{ env.NGINX_VERSION }}/objs/nginx android-nginx/
         $STRIP android-nginx/nginx
-        echo "Built on $(date)" > android-nginx/README.txt
+        echo "Build date: $(date)" > android-nginx/build-info.txt
+        echo "Nginx: ${{ env.NGINX_VERSION }}" >> android-nginx/build-info.txt
+        echo "NDK: ${{ env.NDK_VERSION }} (API ${{ env.ANDROID_API }})" >> android-nginx/build-info.txt
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: android-aarch64-nginx
         path: android-nginx
+        retention-days: 7
