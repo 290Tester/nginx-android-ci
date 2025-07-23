@@ -20,28 +20,36 @@ jobs:
 
     - name: Setup NDK
       run: |
+        echo "Downloading NDK ${{ env.NDK_VERSION }}..."
         wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
         echo "NDK_HOME=$(pwd)/android-ndk-${{ env.NDK_VERSION}}" >> $GITHUB_ENV
+        echo "NDK setup done."
 
     - name: Setup toolchain
       run: |
-        TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-        TARGET=aarch64-linux-android
-        
+        TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+        TARGET="aarch64-linux-android"
+        echo "Toolchain path: $TOOLCHAIN"
         echo "CC=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
         echo "CXX=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
         echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
         echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
+        echo "Toolchain variables set."
 
     - name: Install build dependencies
-      run: sudo apt-get update && sudo apt-get install -y build-essential libtool automake
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libtool automake pkg-config
+        echo "Dependencies installed."
 
     - name: Download Nginx
       run: |
+        echo "Downloading nginx-${{ env.NGINX_VERSION }}..."
         wget -q http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
         tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
+        echo "Nginx source ready."
 
     - name: Apply Android patches
       run: |
@@ -50,10 +58,16 @@ jobs:
         sed -i 's/nginx_init_cycle/ngx_init_cycle/' src/core/nginx.c
         # 禁用 Linux 特定功能
         sed -i 's/NGX_HAVE_SCHED_SETAFFINITY/NGX_HAVE_DUMMY_SCHED_SETAFFINITY/' src/os/unix/ngx_linux_config.h
+        # 修复 struct in6_pktinfo 定义问题（Android NDK r25中可能缺失）
+        sed -i 's/struct in6_pktinfo/struct in6_pktinfo_dummy/' src/event/ngx_event_udp.c
+        echo "Patches applied."
 
     - name: Configure Nginx
       run: |
         cd nginx-${{ env.NGINX_VERSION }}
+        echo "Configuring nginx for Android aarch64..."
+        echo "Using CC: $CC"
+        echo "Using SYSROOT: $SYSROOT"
         ./configure \
           --prefix=/data/local/tmp/nginx \
           --crossbuild=Android \
@@ -63,12 +77,37 @@ jobs:
           --without-http_rewrite_module \
           --without-http_gzip_module \
           --without-pcre \
+          --without-http_ssi_module \
+          --without-http_userid_module \
+          --without-http_access_module \
+          --without-http_auth_basic_module \
+          --without-http_autoindex_module \
+          --without-http_geo_module \
+          --without-http_map_module \
+          --without-http_split_clients_module \
+          --without-http_referer_module \
+          --without-http_fastcgi_module \
+          --without-http_uwsgi_module \
+          --without-http_scgi_module \
+          --without-http_memcached_module \
+          --without-http_limit_conn_module \
+          --without-http_limit_req_module \
+          --without-http_empty_gif_module \
+          --without-http_browser_module \
+          --without-http_upstream_hash_module \
+          --without-http_upstream_ip_hash_module \
+          --without-http_upstream_least_conn_module \
+          --without-http_upstream_keepalive_module \
+          --without-http_upstream_zone_module \
           --with-select_module
+        echo "Configuration complete."
 
     - name: Build Nginx
       run: |
         cd nginx-${{ env.NGINX_VERSION }}
-        make -j$(nproc)
+        echo "Building nginx..."
+        make -j$(nproc) V=1  # 使用V=1输出详细编译命令
+        echo "Build completed."
 
     - name: Prepare artifacts
       run: |
@@ -78,6 +117,7 @@ jobs:
         echo "Build date: $(date)" > android-nginx/build-info.txt
         echo "Nginx: ${{ env.NGINX_VERSION }}" >> android-nginx/build-info.txt
         echo "NDK: ${{ env.NDK_VERSION }} (API ${{ env.ANDROID_API }})" >> android-nginx/build-info.txt
+        echo "Artifacts prepared."
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
