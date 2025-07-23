@@ -1,0 +1,82 @@
+name: Build Android aarch64 Nginx
+
+on:
+  workflow_dispatch: # 允许手动触发
+  push:
+    branches: [ main ] # 根据你的分支名修改
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up NDK
+      run: |
+        NDK_VERSION="r25c"
+        wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
+        unzip -q android-ndk-${NDK_VERSION}-linux.zip
+        echo "NDK_HOME=$(pwd)/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+
+    - name: Set up toolchain
+      run: |
+        export TOOLCHAIN=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        export TARGET=aarch64-linux-android
+        export API_LEVEL=28
+        
+        echo "CC=$TOOLCHAIN/bin/$TARGET$API_LEVEL-clang" >> $GITHUB_ENV
+        echo "CXX=$TOOLCHAIN/bin/$TARGET$API_LEVEL-clang++" >> $GITHUB_ENV
+        echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+        echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
+        echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+        echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+        echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libtool automake
+
+    - name: Download and prepare Nginx
+      run: |
+        NGINX_VERSION="1.25.3"
+        wget -q http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+        tar -xzf nginx-${NGINX_VERSION}.tar.gz
+        cd nginx-${NGINX_VERSION}
+        
+        # Android 特定补丁 (示例)
+        sed -i 's/nginx_init_cycle/ngx_init_cycle/g' src/core/nginx.c
+
+    - name: Configure Nginx
+      run: |
+        cd nginx-${{ env.NGINX_VERSION }}
+        ./configure \
+          --prefix=/data/local/tmp/nginx \
+          --crossbuild=Android \
+          --with-cc="$CC" \
+          --with-cpp="$CXX" \
+          --with-cc-opt="--sysroot=$SYSROOT -fPIE -fPIC" \
+          --with-ld-opt="--sysroot=$SYSROOT -pie" \
+          --without-http_rewrite_module \
+          --without-http_gzip_module \
+          --with-select_module
+
+    - name: Build Nginx
+      run: |
+        cd nginx-${{ env.NGINX_VERSION }}
+        make -j$(nproc)
+
+    - name: Package artifacts
+      run: |
+        mkdir -p android-nginx
+        cp nginx-${{ env.NGINX_VERSION }}/objs/nginx android-nginx/
+        $STRIP android-nginx/nginx
+        echo "Built on $(date)" > android-nginx/README.txt
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: android-aarch64-nginx
+        path: android-nginx
