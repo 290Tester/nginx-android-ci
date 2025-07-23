@@ -9,10 +9,11 @@ env:
   NDK_VERSION: "r25c"
   NGINX_VERSION: "1.25.3"
   ANDROID_API: 28
+  TARGET: "aarch64-linux-android"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # 使用更稳定的Ubuntu版本
 
     steps:
     - name: Checkout repository
@@ -20,58 +21,83 @@ jobs:
 
     - name: Setup NDK
       run: |
-        echo "Downloading NDK ${{ env.NDK_VERSION }}..."
-        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+        # 使用更可靠的下载源
+        wget -q --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 3 \
+          https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
         echo "NDK_HOME=$(pwd)/android-ndk-${{ env.NDK_VERSION}}" >> $GITHUB_ENV
-        echo "NDK setup done."
+        echo "NDK setup complete"
 
     - name: Setup toolchain
       run: |
         TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-        TARGET="aarch64-linux-android"
-        echo "Toolchain path: $TOOLCHAIN"
-        echo "CC=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
-        echo "CXX=$TOOLCHAIN/bin/$TARGET${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
+        
+        # 设置完整工具链路径
+        echo "CC=$TOOLCHAIN/bin/${{ env.TARGET }}${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
+        echo "CXX=$TOOLCHAIN/bin/${{ env.TARGET }}${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
         echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+        echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+        echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
         echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
-        echo "Toolchain variables set."
+        
+        # 验证工具链存在
+        ls -l $TOOLCHAIN/bin/${{ env.TARGET }}${{ env.ANDROID_API }}-clang
+        echo "Toolchain setup complete"
 
     - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libtool automake pkg-config
-        echo "Dependencies installed."
+        sudo apt-get install -y build-essential libtool automake autoconf pkg-config zlib1g-dev
+        echo "Dependencies installed"
 
     - name: Download Nginx
       run: |
-        echo "Downloading nginx-${{ env.NGINX_VERSION }}..."
-        wget -q http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
+        wget -q --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 3 \
+          http://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz
         tar -xzf nginx-${{ env.NGINX_VERSION }}.tar.gz
-        echo "Nginx source ready."
+        echo "Nginx downloaded"
 
     - name: Apply Android patches
       run: |
         cd nginx-${{ env.NGINX_VERSION }}
-        # 关键补丁：修复 Android 初始化问题
+        
+        # 关键补丁集 - 修复Android兼容性问题
+        # 1. 修复init_cycle问题
         sed -i 's/nginx_init_cycle/ngx_init_cycle/' src/core/nginx.c
-        # 禁用 Linux 特定功能
-        sed -i 's/NGX_HAVE_SCHED_SETAFFINITY/NGX_HAVE_DUMMY_SCHED_SETAFFINITY/' src/os/unix/ngx_linux_config.h
-        # 修复 struct in6_pktinfo 定义问题（Android NDK r25中可能缺失）
+        
+        # 2. 禁用Linux特定功能
+        sed -i 's/NGX_HAVE_SCHED_SETAFFINITY/0/' src/os/unix/ngx_linux_config.h
+        sed -i 's/NGX_HAVE_EPOLL/0/' src/event/modules/ngx_epoll_module.c
+        
+        # 3. 修复struct in6_pktinfo问题
         sed -i 's/struct in6_pktinfo/struct in6_pktinfo_dummy/' src/event/ngx_event_udp.c
-        echo "Patches applied."
+        
+        # 4. 修复Android上getaddrinfo的AI_ADDRCONFIG问题
+        sed -i 's/ AI_ADDRCONFIG / 0 /g' src/core/ngx_resolver.c
+        
+        # 5. 修复SIGIO问题
+        sed -i 's/#if (NGX_HAVE_SIGINFO_SI_VALUE)/#if 0/' src/event/ngx_event.c
+        
+        echo "Patches applied"
 
-    - name: Configure Nginx
+    - name: Configure Nginx (精简版)
       run: |
         cd nginx-${{ env.NGINX_VERSION }}
-        echo "Configuring nginx for Android aarch64..."
-        echo "Using CC: $CC"
-        echo "Using SYSROOT: $SYSROOT"
+        
+        # 设置环境变量
+        export CC="$CC"
+        export CXX="$CXX"
+        export AR="$AR"
+        export RANLIB="$RANLIB"
+        export STRIP="$STRIP"
+        export LD="$LD"
+        export SYSROOT="$SYSROOT"
+        
+        # 使用最小配置 - 只包含必要模块
         ./configure \
           --prefix=/data/local/tmp/nginx \
           --crossbuild=Android \
-          --with-cc="$CC" \
           --with-cc-opt="--sysroot=$SYSROOT -fPIE -fPIC" \
           --with-ld-opt="--sysroot=$SYSROOT -pie" \
           --without-http_rewrite_module \
@@ -99,25 +125,36 @@ jobs:
           --without-http_upstream_least_conn_module \
           --without-http_upstream_keepalive_module \
           --without-http_upstream_zone_module \
-          --with-select_module
-        echo "Configuration complete."
+          --with-poll_module \
+          --with-select_module \
+          --without-http-cache
+        
+        echo "Configuration complete"
+        cat objs/autoconf.err  # 输出配置错误信息（如果有）
 
     - name: Build Nginx
       run: |
         cd nginx-${{ env.NGINX_VERSION }}
-        echo "Building nginx..."
-        make -j$(nproc) V=1  # 使用V=1输出详细编译命令
-        echo "Build completed."
+        make -j$(nproc) || make  # 如果并行构建失败，尝试单线程构建
+        echo "Build successful"
 
     - name: Prepare artifacts
       run: |
         mkdir -p android-nginx
         cp nginx-${{ env.NGINX_VERSION }}/objs/nginx android-nginx/
         $STRIP android-nginx/nginx
+        
+        # 创建最小化配置文件
+        echo "worker_processes 1;" > android-nginx/nginx.conf
+        echo "events { worker_connections 1024; use select; }" >> android-nginx/nginx.conf
+        echo "http { server { listen 8080; location / { root /data/local/tmp; } } }" >> android-nginx/nginx.conf
+        
+        # 添加构建信息
         echo "Build date: $(date)" > android-nginx/build-info.txt
         echo "Nginx: ${{ env.NGINX_VERSION }}" >> android-nginx/build-info.txt
         echo "NDK: ${{ env.NDK_VERSION }} (API ${{ env.ANDROID_API }})" >> android-nginx/build-info.txt
-        echo "Artifacts prepared."
+        echo "Target: ${{ env.TARGET }}" >> android-nginx/build-info.txt
+        echo "Artifacts prepared"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
